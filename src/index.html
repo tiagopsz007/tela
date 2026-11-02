@@ -8,10 +8,13 @@
 <body>
   <header>
     <h1>VPN Comms</h1>
-    <div id="connection-status" class="status">Desconectado</div>
+    <div class="header-controls">
+      <select id="mic-select" title="Microfone (Entrada)"></select>
+      <select id="speaker-select" title="Alto-falantes (Saída)"></select>
+      <div id="connection-status" class="status">Desconectado</div>
+    </div>
   </header>
 
-  <!-- Tela Inicial de Conexão -->
   <div id="setup-screen">
     <div class="card">
       <h2>Hospedar Sala</h2>
@@ -26,14 +29,23 @@
     </div>
   </div>
 
-  <!-- Tela da Chamada (Voz e Tela) -->
   <div id="call-screen">
     <div id="video-container">
+      <!-- Vídeo e Áudio de quem recebemos -->
       <video id="remote-video" autoplay playsinline></video>
+      <audio id="remote-voice" autoplay></audio>
+      
+      <!-- Pré-visualização local da tela compartilhada -->
+      <div id="local-preview-container">
+        <div class="preview-label">Você está transmitindo:</div>
+        <video id="local-screen-preview" autoplay playsinline muted></video>
+      </div>
     </div>
+    
     <div class="controls">
       <button class="btn-primary" id="btn-mic">Desativar Mic</button>
       <button class="btn-secondary" id="btn-screen">Compartilhar Tela</button>
+      <button class="btn-primary" id="btn-fullscreen">Tela Cheia</button>
       <button class="btn-danger" id="btn-end">Encerrar Chamada</button>
     </div>
   </div>

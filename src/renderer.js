@@ -1,15 +1,17 @@
 const WebSocket = require('ws');
 
-// Elementos da UI
 const setupScreen = document.getElementById('setup-screen');
 const callScreen = document.getElementById('call-screen');
 const statusBadge = document.getElementById('connection-status');
 const remoteVideo = document.getElementById('remote-video');
+const remoteVoice = document.getElementById('remote-voice');
+const micSelect = document.getElementById('mic-select');
 
 const btnHost = document.getElementById('btn-host');
 const btnConnect = document.getElementById('btn-connect');
 const btnMic = document.getElementById('btn-mic');
 const btnScreen = document.getElementById('btn-screen');
+const btnFullscreen = document.getElementById('btn-fullscreen');
 const btnEnd = document.getElementById('btn-end');
 const targetIpInput = document.getElementById('target-ip');
 
@@ -21,27 +23,50 @@ let isHost = false;
 let isMicMuted = false;
 
 const wsPort = 8080;
-const rtcConfig = {
-  // Como estamos em VPN (LAN virtual), STUN servers não são obrigatórios, mas ajudam em rotas difíceis.
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-};
+const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
-// ================= SISTEMA DE CONEXÃO (SIGNALING) ================= //
+// Carrega a lista de microfones ao abrir o app
+navigator.mediaDevices.enumerateDevices().then(devices => {
+  devices.filter(d => d.kind === 'audioinput').forEach(mic => {
+    const option = document.createElement('option');
+    option.value = mic.deviceId;
+    option.text = mic.label || `Microfone ${micSelect.length + 1}`;
+    micSelect.appendChild(option);
+  });
+});
+
+// Troca de microfone em tempo real
+micSelect.addEventListener('change', async () => {
+  if (!localStream || !peerConnection) return;
+  const newMicStream = await navigator.mediaDevices.getUserMedia({
+    audio: { deviceId: { exact: micSelect.value } }
+  });
+  
+  const newAudioTrack = newMicStream.getAudioTracks()[0];
+  newAudioTrack.enabled = !isMicMuted;
+  
+  // Substitui a faixa antiga no envio P2P
+  const sender = peerConnection.getSenders().find(s => s.track.kind === 'audio' && !screenStream?.getTracks().includes(s.track));
+  if (sender) sender.replaceTrack(newAudioTrack);
+  
+  localStream.getAudioTracks()[0].stop(); // Desliga o mic antigo
+  localStream = newMicStream; // Atualiza a referência
+});
 
 btnHost.addEventListener('click', async () => {
   isHost = true;
-  startSignalingServer();
   await initLocalMedia();
-  updateStatus('Aguardando conexão...', false);
+  startSignalingServer();
+  updateStatus('Aguardar conexão...', false);
 });
 
 btnConnect.addEventListener('click', async () => {
   const ip = targetIpInput.value.trim();
-  if (!ip) return alert("Insira o IP do Radmin VPN do anfitrião.");
+  if (!ip) return alert("Insira o IP da Radmin VPN do anfitrião.");
   isHost = false;
   await initLocalMedia();
   connectToSignalingServer(ip);
-  updateStatus('Conectando...', false);
+  updateStatus('A conectar...', false);
 });
 
 function startSignalingServer() {
@@ -50,7 +75,6 @@ function startSignalingServer() {
     ws = socket;
     setupSignalingHandlers();
     createPeerConnection();
-    // O anfitrião inicia a oferta WebRTC
     peerConnection.createOffer()
       .then(offer => peerConnection.setLocalDescription(offer))
       .then(() => sendSignalingMsg('offer', peerConnection.localDescription));
@@ -69,7 +93,6 @@ function connectToSignalingServer(ip) {
 function setupSignalingHandlers() {
   ws.on('message', async (message) => {
     const data = JSON.parse(message);
-    
     if (data.type === 'offer') {
       await peerConnection.setRemoteDescription(new RTCSessionDescription(data.data));
       const answer = await peerConnection.createAnswer();
@@ -83,55 +106,51 @@ function setupSignalingHandlers() {
       await peerConnection.addIceCandidate(new RTCIceCandidate(data.data));
     }
   });
-
   ws.on('close', endCall);
 }
 
 function sendSignalingMsg(type, data) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type, data }));
-  }
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type, data }));
 }
-
-// ================= WEBRTC E MÍDIA ================= //
 
 async function initLocalMedia() {
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const deviceId = micSelect.value ? { exact: micSelect.value } : undefined;
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId }, video: false });
     switchToCallScreen();
   } catch (e) {
-    alert("Erro ao acessar microfone: " + e.message);
+    alert("Erro ao aceder ao microfone: " + e.message);
   }
 }
 
 function createPeerConnection() {
   peerConnection = new RTCPeerConnection(rtcConfig);
 
-  // Adiciona a voz local na conexão
+  // Envia o microfone (Stream 1)
   localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
 
-  // Recebe voz/tela remota
+  // Recebe faixas e roteia para a tag HTML correta
   peerConnection.ontrack = (event) => {
-    if (event.streams && event.streams[0]) {
-      remoteVideo.srcObject = event.streams[0];
+    const stream = event.streams[0];
+    
+    // Se a stream recebida contiver vídeo, é o Compartilhamento de Tela (Vídeo + Áudio do PC)
+    if (stream.getVideoTracks().length > 0) {
+      remoteVideo.srcObject = stream;
+    } else {
+      // Se não tiver vídeo, é a voz do microfone do amigo
+      remoteVoice.srcObject = stream;
     }
   };
 
-  // Troca de rotas P2P
   peerConnection.onicecandidate = (event) => {
     if (event.candidate) sendSignalingMsg('ice-candidate', event.candidate);
   };
 
   peerConnection.oniceconnectionstatechange = () => {
-    if (peerConnection.iceConnectionState === 'connected') {
-      updateStatus('Conectado via VPN', true);
-    } else if (peerConnection.iceConnectionState === 'disconnected') {
-      endCall();
-    }
+    if (peerConnection.iceConnectionState === 'connected') updateStatus('Conectado via VPN', true);
+    else if (peerConnection.iceConnectionState === 'disconnected') endCall();
   };
 }
-
-// ================= CONTROLES DA INTERFACE ================= //
 
 btnMic.addEventListener('click', () => {
   if (!localStream) return;
@@ -145,23 +164,23 @@ btnMic.addEventListener('click', () => {
 btnScreen.addEventListener('click', async () => {
   if (!screenStream) {
     try {
-      // Solicita captura de tela. O Electron invoca o seletor nativo do Windows.
+      // Pede permissão para capturar tela E áudio do sistema
       screenStream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: "always" }, audio: true });
       
-      const videoTrack = screenStream.getVideoTracks()[0];
-      peerConnection.addTrack(videoTrack, screenStream);
+      // Envia todas as faixas (Vídeo e Áudio do PC) gerando uma Stream nova (Stream 2)
+      screenStream.getTracks().forEach(track => {
+        peerConnection.addTrack(track, screenStream);
+        track.onended = stopScreenShare;
+      });
       
-      // Renegocia a conexão WebRTC para incluir o novo canal de vídeo
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
       sendSignalingMsg('offer', peerConnection.localDescription);
 
-      btnScreen.innerText = "Parar Compartilhamento";
+      btnScreen.innerText = "Parar Partilha";
       btnScreen.className = "btn-danger";
-
-      videoTrack.onended = stopScreenShare; // Se usuário fechar a tela nativamente
     } catch (e) {
-      console.error("Compartilhamento cancelado", e);
+      console.error("Partilha cancelada", e);
     }
   } else {
     stopScreenShare();
@@ -176,15 +195,29 @@ function stopScreenShare() {
       if (sender) peerConnection.removeTrack(sender);
     });
     screenStream = null;
-    btnScreen.innerText = "Compartilhar Tela";
+    btnScreen.innerText = "Partilhar Ecrã";
     btnScreen.className = "btn-secondary";
     
-    // Atualiza o PeerConnection sem o vídeo
     peerConnection.createOffer()
       .then(offer => peerConnection.setLocalDescription(offer))
       .then(() => sendSignalingMsg('offer', peerConnection.localDescription));
   }
 }
+
+// Botão de Tela Cheia
+btnFullscreen.addEventListener('click', () => {
+  if (!document.fullscreenElement) {
+    remoteVideo.requestFullscreen().catch(err => alert(`Erro ao ativar tela cheia: ${err.message}`));
+  } else {
+    document.exitFullscreen();
+  }
+});
+
+// Suporte a duplo-clique no vídeo para tela cheia
+remoteVideo.addEventListener('dblclick', () => {
+  if (!document.fullscreenElement) remoteVideo.requestFullscreen();
+  else document.exitFullscreen();
+});
 
 btnEnd.addEventListener('click', endCall);
 
@@ -200,6 +233,7 @@ function endCall() {
   setupScreen.style.display = 'flex';
   callScreen.style.display = 'none';
   remoteVideo.srcObject = null;
+  remoteVoice.srcObject = null;
   updateStatus('Desconectado', false);
 }
 
