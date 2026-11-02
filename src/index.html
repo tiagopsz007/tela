@@ -31,11 +31,13 @@
 
   <div id="call-screen">
     <div id="video-container">
-      <!-- Vídeo e Áudio de quem recebemos -->
+      <!-- Texto que fica no fundo preto quando ninguém transmite a tela -->
+      <div id="no-video-text">Nenhuma tela sendo recebida</div>
+      
       <video id="remote-video" autoplay playsinline></video>
       <audio id="remote-voice" autoplay></audio>
       
-      <!-- Pré-visualização local da tela compartilhada -->
+      <!-- Sua própria tela quando você transmite -->
       <div id="local-preview-container">
         <div class="preview-label">Você está transmitindo:</div>
         <video id="local-screen-preview" autoplay playsinline muted></video>
