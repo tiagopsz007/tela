@@ -318,7 +318,9 @@ async function handleSignal({ type, data }) {
     if (ignoreOffer) return;
     await pc.setRemoteDescription(data);
     if (data.type === 'offer') {
-      await pc.setLocalDescription();
+      const answer = await pc.createAnswer();
+      answer.sdp = tuneOpus(answer.sdp); // áudio estéreo em alta qualidade também na resposta
+      await pc.setLocalDescription(answer);
       sendSignalingMsg('description', pc.localDescription);
     }
     return;
@@ -334,6 +336,24 @@ async function handleSignal({ type, data }) {
 }
 
 // ---------- WebRTC ----------
+// Por padrão o WebRTC usa o Opus em modo "voz": mono e ~32 kbps, o que dá aquele som de gravação de celular.
+// Aqui liberamos estéreo e até 256 kbps (a VPN aguenta de sobra), sem modo de baixa banda.
+function tuneOpus(sdp) {
+  const match = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/);
+  if (!match) return sdp;
+  const pt = match[1];
+  const extra = 'stereo=1;sprop-stereo=1;maxaveragebitrate=256000;maxplaybackrate=48000;useinbandfec=1;usedtx=0';
+  const fmtp = new RegExp(`a=fmtp:${pt} ([^\\r\\n]*)`);
+  if (fmtp.test(sdp)) {
+    return sdp.replace(fmtp, (_all, params) => {
+      // Remove parâmetros antigos que vamos redefinir
+      const kept = params.split(';').filter(p => p && !/^(stereo|sprop-stereo|maxaveragebitrate|maxplaybackrate|useinbandfec|usedtx)=/.test(p.trim()));
+      return `a=fmtp:${pt} ${[...kept, extra].join(';')}`;
+    });
+  }
+  return sdp.replace(match[0], `${match[0]}\r\na=fmtp:${pt} ${extra}`);
+}
+
 function createPeerConnection() {
   pc = new RTCPeerConnection(rtcConfig);
   makingOffer = false;
@@ -343,7 +363,9 @@ function createPeerConnection() {
   pc.onnegotiationneeded = async () => {
     try {
       makingOffer = true;
-      await pc.setLocalDescription();
+      const offer = await pc.createOffer();
+      offer.sdp = tuneOpus(offer.sdp);
+      await pc.setLocalDescription(offer);
       sendSignalingMsg('description', pc.localDescription);
     } catch (err) {
       console.error(err);
@@ -462,7 +484,11 @@ pickerConfirm.addEventListener('click', async () => {
         height: { max: currentQuality.height },
         frameRate: { max: currentQuality.fps }
       },
+      // Captura "crua" do áudio do sistema: sem cancelamento de eco, sem supressão de ruído e sem controle
+      // automático de ganho (filtros feitos para voz que deixam jogos/músicas abafados e "metálicos")
       audio: optAudio.checked
+        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
+        : false
     });
   } catch (e) {
     console.error('Compartilhamento cancelado', e);
@@ -472,6 +498,7 @@ pickerConfirm.addEventListener('click', async () => {
 
   const videoTrack = screenStream.getVideoTracks()[0];
   if (videoTrack) videoTrack.contentHint = 'motion';
+  screenStream.getAudioTracks().forEach(t => { t.contentHint = 'music'; }); // trata como música, não como voz
   videoTrack.onended = stopScreenShare; // usuário parou pelo sistema
 
   // Avisa o amigo qual stream é a tela ANTES de adicionar as faixas (a mensagem chega primeiro)
@@ -488,6 +515,17 @@ pickerConfirm.addEventListener('click', async () => {
 // Define bitrate / fps da tela transmitida (só funciona depois da negociação)
 async function applyScreenEncoding() {
   for (const sender of screenSenders) {
+    if (sender.track?.kind === 'audio') {
+      try {
+        const params = sender.getParameters();
+        if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+        params.encodings[0].maxBitrate = 256_000;
+        await sender.setParameters(params);
+      } catch (err) {
+        console.warn('Não foi possível ajustar o bitrate do áudio', err);
+      }
+      continue;
+    }
     if (sender.track?.kind !== 'video') continue;
     try {
       const params = sender.getParameters();
