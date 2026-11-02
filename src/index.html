@@ -9,19 +9,27 @@
   <header>
     <h1>VPN Comms</h1>
     <div class="header-controls">
-      <select id="mic-select" title="Microfone (Entrada)"></select>
-      <select id="speaker-select" title="Alto-falantes (Saída)"></select>
+      <label class="device-field" title="Microfone (entrada)">
+        <span class="device-icon">🎤</span>
+        <select id="mic-select"></select>
+      </label>
+      <label class="device-field" title="Alto-falantes / fones (saída)">
+        <span class="device-icon">🔊</span>
+        <select id="speaker-select"></select>
+      </label>
       <div id="connection-status" class="status">Desconectado</div>
     </div>
   </header>
 
+  <!-- ===== TELA INICIAL ===== -->
   <div id="setup-screen">
     <div class="card">
       <h2>Hospedar Sala</h2>
-      <p style="font-size: 0.85rem; color: #9ca3af; margin-bottom: 15px;">Aguardar conexão no seu IP Radmin</p>
+      <p class="hint">Aguarde seu amigo conectar no seu IP da Radmin VPN</p>
+      <div id="my-ip-box" class="ip-box">Detectando seu IP...</div>
       <button class="btn-primary" id="btn-host">Iniciar como Anfitrião</button>
     </div>
-    
+
     <div class="card">
       <h2>Conectar a um Amigo</h2>
       <input type="text" id="target-ip" placeholder="Ex: 26.100.50.20" />
@@ -29,28 +37,55 @@
     </div>
   </div>
 
+  <!-- ===== TELA DA CHAMADA ===== -->
   <div id="call-screen">
-    <div id="video-container">
-      <!-- Texto que fica no fundo preto quando ninguém transmite a tela -->
-      <div id="no-video-text">Nenhuma tela sendo recebida</div>
-      
-      <video id="remote-video" autoplay playsinline></video>
+    <div id="stage">
+      <div id="no-video-text">Nenhuma tela sendo transmitida</div>
+      <div id="stage-label"></div>
+
+      <!-- Os dois vídeos trocam de lugar (principal / miniatura) via classes CSS -->
+      <video id="remote-video" class="stage-video hidden" autoplay playsinline></video>
+      <video id="local-video" class="stage-video hidden" autoplay playsinline muted></video>
       <audio id="remote-voice" autoplay></audio>
-      
-      <!-- Sua própria tela quando você transmite -->
-      <div id="local-preview-container">
-        <div class="preview-label">Você está transmitindo:</div>
-        <video id="local-screen-preview" autoplay playsinline muted></video>
-      </div>
     </div>
-    
+
     <div class="controls">
       <button class="btn-primary" id="btn-mic">Desativar Mic</button>
       <button class="btn-secondary" id="btn-screen">Compartilhar Tela</button>
       <button class="btn-primary" id="btn-fullscreen">Tela Cheia</button>
+      <label class="volume-field" title="Volume do seu amigo">
+        <span>Volume</span>
+        <input type="range" id="volume" min="0" max="100" value="100" />
+      </label>
       <button class="btn-danger" id="btn-end">Encerrar Chamada</button>
     </div>
   </div>
+
+  <!-- ===== SELETOR DE TELA / JANELA ===== -->
+  <div id="picker" class="overlay hidden">
+    <div class="picker-box">
+      <h2>O que você quer compartilhar?</h2>
+      <div id="picker-grid"></div>
+      <div class="picker-options">
+        <label class="check"><input type="checkbox" id="opt-audio" checked /> Compartilhar áudio do sistema</label>
+        <label class="quality">
+          Qualidade
+          <select id="opt-quality">
+            <option value="1080p30">1080p · 30 fps (recomendado)</option>
+            <option value="1080p60">1080p · 60 fps</option>
+            <option value="720p30">720p · 30 fps (conexão fraca)</option>
+          </select>
+        </label>
+      </div>
+      <p class="hint">Dica: use fones de ouvido ao compartilhar áudio do sistema, senão seu amigo ouvirá a própria voz de volta.</p>
+      <div class="picker-actions">
+        <button class="btn-gray" id="picker-cancel">Cancelar</button>
+        <button class="btn-secondary" id="picker-confirm" disabled>Compartilhar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
 
   <script src="renderer.js"></script>
 </body>
