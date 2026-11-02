@@ -1,0 +1,24 @@
+* { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+body { background-color: #111827; color: #f3f4f6; display: flex; flex-direction: column; height: 100vh; }
+header { background-color: #1f2937; padding: 15px 20px; border-bottom: 1px solid #374151; display: flex; justify-content: space-between; align-items: center; }
+h1 { font-size: 1.2rem; color: #60a5fa; }
+.header-controls { display: flex; gap: 15px; align-items: center; }
+select { background: #374151; color: white; border: 1px solid #4b5563; padding: 5px 10px; border-radius: 6px; outline: none; }
+.status { font-size: 0.9rem; padding: 5px 10px; border-radius: 20px; background: #374151; color: #9ca3af; }
+.status.connected { background: #065f46; color: #34d399; }
+
+#setup-screen { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; padding: 20px; gap: 20px; }
+.card { background: #1f2937; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); width: 100%; max-width: 400px; text-align: center; border: 1px solid #374151; }
+.card h2 { margin-bottom: 20px; font-size: 1.1rem; }
+input { width: 100%; padding: 12px; margin-bottom: 15px; border-radius: 8px; border: 1px solid #4b5563; background: #374151; color: white; outline: none; }
+button { width: 100%; padding: 12px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; transition: filter 0.2s; margin-bottom: 10px; }
+button:hover { filter: brightness(1.2); }
+.btn-primary { background: #3b82f6; color: white; }
+.btn-secondary { background: #10b981; color: white; }
+.btn-danger { background: #ef4444; color: white; }
+
+#call-screen { display: none; flex-direction: column; flex: 1; }
+#video-container { flex: 1; background: #000; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+video { max-width: 100%; max-height: 100%; }
+.controls { background: #1f2937; padding: 15px; display: flex; justify-content: center; gap: 15px; border-top: 1px solid #374151; }
+.controls button { width: auto; padding: 10px 20px; margin: 0; }

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>VPN Comms</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>VPN Comms</h1>
+    <div class="header-controls">
+      <select id="mic-select"></select>
+      <div id="connection-status" class="status">Desconectado</div>
+    </div>
+  </header>
+
+  <div id="setup-screen">
+    <div class="card">
+      <h2>Hospedar Sala</h2>
+      <p style="font-size: 0.85rem; color: #9ca3af; margin-bottom: 15px;">Aguardar conexão no seu IP Radmin</p>
+      <button class="btn-primary" id="btn-host">Iniciar como Anfitrião</button>
+    </div>
+    
+    <div class="card">
+      <h2>Conectar a um Amigo</h2>
+      <input type="text" id="target-ip" placeholder="Ex: 26.100.50.20" />
+      <button class="btn-secondary" id="btn-connect">Conectar</button>
+    </div>
+  </div>
+
+  <div id="call-screen">
+    <div id="video-container">
+      <video id="remote-video" autoplay playsinline></video>
+      <audio id="remote-voice" autoplay></audio>
+    </div>
+    <div class="controls">
+      <button class="btn-primary" id="btn-mic">Desativar Mic</button>
+      <button class="btn-secondary" id="btn-screen">Compartilhar Tela</button>
+      <button class="btn-primary" id="btn-fullscreen">Tela Cheia</button>
+      <button class="btn-danger" id="btn-end">Encerrar Chamada</button>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
