@@ -1,5 +1,9 @@
 const WebSocket = require('ws');
 const os = require('os');
+const fs = require('fs');
+const path = require('path');
+const { pathToFileURL } = require('url');
+const { RnnoiseWorkletNode } = require('@sapphi-red/web-noise-suppressor');
 const { ipcRenderer, clipboard } = require('electron');
 
 // ---------- Elementos ----------
@@ -29,7 +33,10 @@ const pickerGrid = $('picker-grid');
 const pickerConfirm = $('picker-confirm');
 const pickerCancel = $('picker-cancel');
 const optAudio = $('opt-audio');
+const optAec = $('opt-aec');
+const aecField = $('aec-field');
 const optQuality = $('opt-quality');
+const optNoise = $('opt-noise');
 const toastEl = $('toast');
 
 // ---------- Estado ----------
@@ -46,7 +53,9 @@ const QUALITY = {
 let wss = null;
 let ws = null;
 let pc = null;
-let localStream = null;      // microfone
+let localStream = null;      // microfone (já processado pelo RNNoise)
+let echoChain = null;        // cancelador de eco do áudio da tela (só no Windows 10 antigo)
+let micChain = null;         // cadeia de áudio do microfone (contexto, nós, stream bruto)
 let micSender = null;
 let screenStream = null;     // tela que EU transmito
 let screenSenders = [];
@@ -118,7 +127,7 @@ async function loadAudioDevices() {
   const devices = await navigator.mediaDevices.enumerateDevices();
   const savedMic = localStorage.getItem('micId');
   const savedSpk = localStorage.getItem('speakerId');
-  const activeMic = localStream?.getAudioTracks()[0]?.getSettings().deviceId;
+  const activeMic = micChain?.deviceId;
 
   micSelect.innerHTML = '';
   speakerSelect.innerHTML = '';
@@ -171,26 +180,114 @@ micSelect.addEventListener('change', async () => {
   localStorage.setItem('micId', micSelect.value);
   if (!localStream) return; // na tela inicial só guarda a preferência; o mic abre ao iniciar a chamada
   try {
-    const newStream = await navigator.mediaDevices.getUserMedia({ audio: micConstraints(micSelect.value) });
-    const newTrack = newStream.getAudioTracks()[0];
+    const chain = await createMic(micSelect.value);
+    const newTrack = chain.stream.getAudioTracks()[0];
     newTrack.enabled = !isMicMuted;
 
     if (micSender) await micSender.replaceTrack(newTrack);
-    localStream?.getAudioTracks().forEach(t => t.stop());
-    localStream = newStream;
+    stopMic(micChain);
+    micChain = chain;
+    localStream = chain.stream;
   } catch (err) {
     console.error(err);
     toast('Não foi possível usar esse microfone.');
   }
 });
 
-function micConstraints(deviceId) {
+function micConstraints(deviceId, browserNoiseSuppression) {
   return {
     deviceId: deviceId ? { exact: deviceId } : undefined,
     echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true
+    // Desligado quando o RNNoise está em uso: dois filtros em sequência distorcem a voz
+    noiseSuppression: browserNoiseSuppression,
+    autoGainControl: true,
+    channelCount: 1
   };
+}
+
+// ---------- Supressão de ruído (RNNoise) ----------
+// microfone -> AudioContext -> RNNoise (worklet) -> MediaStreamDestination -> WebRTC
+const RNNOISE_WORKLET_URL = pathToFileURL(require.resolve('@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js')).href;
+const RNNOISE_WASM_PATH = require.resolve('@sapphi-red/web-noise-suppressor/rnnoise.wasm');
+let rnnoiseWasm = null;
+let noiseAiEnabled = localStorage.getItem('noiseAi') !== 'off';
+
+optNoise.checked = noiseAiEnabled;
+optNoise.addEventListener('change', () => {
+  noiseAiEnabled = optNoise.checked;
+  localStorage.setItem('noiseAi', noiseAiEnabled ? 'on' : 'off');
+  micChain?.setNoise(noiseAiEnabled);
+});
+
+// Monta: entrada -> mono (centralizado) -> destino estéreo.
+// Alguns microfones USB entregam 2 canais com um deles vazio; sem esse passo a voz sairia só de um lado.
+function buildMonoChain(rawStream) {
+  const ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' }); // RNNoise exige 48 kHz
+  const source = ctx.createMediaStreamSource(rawStream);
+  const mono = ctx.createGain();
+  mono.channelCount = 1;
+  mono.channelCountMode = 'explicit';       // mistura qualquer entrada em 1 canal
+  mono.channelInterpretation = 'speakers';
+  const dest = ctx.createMediaStreamDestination();
+  dest.channelCount = 2;                    // mono -> estéreo com o mesmo sinal nos dois lados
+  source.connect(mono);
+  return { ctx, source, mono, dest };
+}
+
+async function createMic(deviceId) {
+  const raw = await navigator.mediaDevices.getUserMedia({ audio: micConstraints(deviceId, false) });
+  const usedDeviceId = raw.getAudioTracks()[0]?.getSettings().deviceId;
+  let chain = null;
+  let rn = null;
+
+  try {
+    if (!rnnoiseWasm) {
+      const buf = fs.readFileSync(RNNOISE_WASM_PATH);
+      rnnoiseWasm = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+    }
+    chain = buildMonoChain(raw);
+    const { ctx, mono, dest } = chain;
+    await ctx.audioWorklet.addModule(RNNOISE_WORKLET_URL);
+    await ctx.resume();
+
+    rn = new RnnoiseWorkletNode(ctx, { maxChannels: 1, wasmBinary: rnnoiseWasm });
+    rn.connect(dest);
+
+    const setNoise = (on) => {
+      mono.disconnect();
+      mono.connect(on ? rn : dest); // desligar = voz direta, sem filtro (continua centralizada)
+    };
+    setNoise(noiseAiEnabled);
+
+    return { stream: dest.stream, raw, ctx, rn, setNoise, deviceId: usedDeviceId };
+  } catch (err) {
+    // Se o RNNoise falhar, usa o filtro nativo do Chromium para não ficar sem microfone
+    console.error('RNNoise indisponível, usando supressão nativa:', err);
+    try { rn?.destroy(); } catch {}
+    chain?.ctx.close().catch(() => {});
+    raw.getTracks().forEach(t => t.stop());
+    toast('Supressão de ruído por IA indisponível. Usando a padrão.');
+
+    const fallback = await navigator.mediaDevices.getUserMedia({ audio: micConstraints(deviceId, true) });
+    const fbDeviceId = fallback.getAudioTracks()[0]?.getSettings().deviceId;
+    try {
+      const fb = buildMonoChain(fallback);
+      fb.mono.connect(fb.dest);
+      await fb.ctx.resume();
+      return { stream: fb.dest.stream, raw: fallback, ctx: fb.ctx, rn: null, setNoise: () => {}, deviceId: fbDeviceId };
+    } catch (err2) {
+      console.error(err2);
+      return { stream: fallback, raw: fallback, ctx: null, rn: null, setNoise: () => {}, deviceId: fbDeviceId };
+    }
+  }
+}
+
+function stopMic(chain) {
+  if (!chain) return;
+  try { chain.rn?.destroy(); } catch {}
+  chain.raw.getTracks().forEach(t => t.stop());
+  chain.stream.getTracks().forEach(t => t.stop());
+  chain.ctx?.close().catch(() => {});
 }
 
 volumeSlider.addEventListener('input', () => {
@@ -204,11 +301,12 @@ async function initLocalMedia() {
   try {
     const saved = localStorage.getItem('micId');
     try {
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: micConstraints(saved) });
+      micChain = await createMic(saved);
     } catch {
       // Microfone salvo não existe mais: usa o padrão
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: micConstraints(null) });
+      micChain = await createMic(null);
     }
+    localStream = micChain.stream;
     await loadAudioDevices();
     return true;
   } catch (e) {
@@ -255,6 +353,34 @@ targetIpInput.value = localStorage.getItem('lastIp') || '';
 targetIpInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') btnConnect.click(); });
 
 // ---------- Sinalização (WebSocket pela VPN) ----------
+// O WebSocket só serve para negociar a conexão. A voz e a tela vão direto pelo WebRTC.
+// Por isso, se o WebSocket cair, a chamada continua e ele é reconectado em segundo plano.
+const HEARTBEAT_INTERVAL = 5000;   // ping a cada 5 s (também impede a VPN/NAT de derrubar conexão ociosa)
+const HEARTBEAT_TIMEOUT = 15000;   // sem sinal de vida por 15 s: considera o socket morto
+const RECONNECT_DELAY = 2000;      // tempo entre tentativas de reconectar a sinalização
+const GRACE_MS = 45000;            // quanto tempo tentar recuperar a mídia antes de desistir da chamada
+
+let hbTimer = null;
+let lastSeen = 0;
+let reconnectTimer = null;
+let graceTimer = null;
+let restartTimer = null;
+let targetIp = null;
+
+function startHeartbeat(sock) {
+  clearInterval(hbTimer);
+  lastSeen = Date.now();
+  const alive = () => { lastSeen = Date.now(); };
+  sock.on('pong', alive);
+  sock.on('ping', alive);
+  sock.on('message', alive);
+  hbTimer = setInterval(() => {
+    if (sock.readyState !== WebSocket.OPEN) return;
+    if (Date.now() - lastSeen > HEARTBEAT_TIMEOUT) { sock.terminate(); return; } // dispara 'close' -> reconecta
+    try { sock.ping(); } catch {}
+  }, HEARTBEAT_INTERVAL);
+}
+
 function startSignalingServer() {
   ending = false;
   const { found } = detectRadminIps();
@@ -270,32 +396,75 @@ function startSignalingServer() {
       : 'Erro no servidor: ' + err.message);
   });
   wss.on('connection', (socket) => {
-    if (ws) { socket.close(); return; } // só aceita um amigo por vez
+    // Só aceita um amigo por vez, a menos que o socket atual esteja morto (amigo reconectando após queda)
+    const current = ws;
+    const currentAlive = current && current.readyState === WebSocket.OPEN && (Date.now() - lastSeen) < 10000;
+    if (currentAlive) { socket.close(); return; }
+
+    const reconnecting = !!pc;
+    if (current) { current.removeAllListeners(); current.on('error', () => {}); current.terminate(); }
     ws = socket;
-    setupSignalingHandlers();
-    updateStatus('Conectando...', 'waiting');
-    createPeerConnection(); // o addTrack dispara a negociação e o host envia a oferta
+    setupSignalingHandlers(socket);
+
+    if (reconnecting) {
+      onSignalingRestored(); // chamada já existia: só retoma a negociação
+    } else {
+      updateStatus('Conectando...', 'waiting');
+      createPeerConnection(); // o addTrack dispara a negociação e o host envia a oferta
+    }
   });
 }
 
 function connectToSignalingServer(ip) {
   ending = false;
+  targetIp = ip;
   updateStatus('Conectando...', 'waiting');
   noVideoText.textContent = 'Conectando ao anfitrião...';
-  ws = new WebSocket(`ws://${ip}:${WS_PORT}`, { handshakeTimeout: 8000 });
-  ws.on('open', () => {
-    setupSignalingHandlers();
-    createPeerConnection();
-  });
-  ws.on('error', () => endCall('Não foi possível conectar. Confira o IP, a Radmin VPN e o firewall (porta 8080).'));
+  openClientSocket(true);
 }
 
-function setupSignalingHandlers() {
+function openClientSocket(first) {
+  const sock = new WebSocket(`ws://${targetIp}:${WS_PORT}`, { handshakeTimeout: 8000 });
+  ws = sock;
+  setupSignalingHandlers(sock);
+  sock.on('open', () => {
+    if (first) createPeerConnection();
+    else onSignalingRestored();
+  });
+  sock.on('error', () => {
+    // Na primeira vez avisa o erro; depois disso o 'close' cuida de tentar de novo
+    if (first && !pc) endCall('Não foi possível conectar. Confira o IP, a Radmin VPN e o firewall (porta 8080).');
+  });
+}
+
+function setupSignalingHandlers(sock) {
+  startHeartbeat(sock);
   // Mensagens processadas em fila, uma de cada vez, para manter a ordem
-  ws.on('message', (raw) => {
+  sock.on('message', (raw) => {
     messageQueue = messageQueue.then(() => handleSignal(JSON.parse(raw))).catch(console.error);
   });
-  ws.on('close', () => endCall('O amigo desconectou.', 'info'));
+  sock.on('close', () => handleSignalingClosed(sock));
+}
+
+function handleSignalingClosed(sock) {
+  if (sock !== ws || ending) return; // socket antigo já substituído, ou chamada encerrada de propósito
+  clearInterval(hbTimer);
+  // Anfitrião: só espera o amigo voltar. Cliente: tenta reconectar até dar certo.
+  if (!isHost) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => { if (!ending) openClientSocket(false); }, RECONNECT_DELAY);
+  }
+}
+
+// Sinalização voltou depois de uma queda: reenvia o que pode ter se perdido
+async function onSignalingRestored() {
+  if (!pc || ending) return;
+  try {
+    // Se havia uma oferta pendente que o amigo nunca recebeu, desfaz para renegociar do zero
+    if (pc.signalingState === 'have-local-offer') await pc.setLocalDescription({ type: 'rollback' });
+  } catch (err) { console.error('rollback', err); }
+  if (screenStream) sendSignalingMsg('screen-info', screenStream.id);
+  if (pc.connectionState !== 'connected') pc.restartIce();
 }
 
 function sendSignalingMsg(type, data) {
@@ -303,6 +472,7 @@ function sendSignalingMsg(type, data) {
 }
 
 async function handleSignal({ type, data }) {
+  if (type === 'bye') { endCall('O amigo desconectou.', 'info'); return; } // amigo encerrou de propósito
   if (!pc) return;
 
   if (type === 'screen-info') {
@@ -384,6 +554,7 @@ function createPeerConnection() {
       applySpeaker();
     } else if (remoteVoice.srcObject !== stream) {
       remoteVoice.srcObject = stream; // voz do amigo
+      attachEchoReference();
     }
     updateStage();
   };
@@ -397,15 +568,28 @@ function createPeerConnection() {
     const state = pc.connectionState;
     clearTimeout(disconnectTimer);
     if (state === 'connected') {
+      // Voltou (ou conectou pela primeira vez): cancela qualquer tentativa de recuperação
+      clearTimeout(graceTimer); graceTimer = null;
+      clearInterval(restartTimer); restartTimer = null;
       updateStatus('Conectado via VPN', 'connected');
       noVideoText.textContent = 'Nenhuma tela sendo transmitida';
-    } else if (state === 'disconnected') {
-      // Pode ser só uma oscilação: espera alguns segundos antes de desistir
-      disconnectTimer = setTimeout(() => {
-        if (pc && pc.connectionState === 'disconnected') endCall('Conexão perdida.');
-      }, 6000);
-    } else if (state === 'failed') {
-      endCall('Falha na conexão com o amigo.');
+    } else if (state === 'disconnected' || state === 'failed') {
+      // Oscilação de rede: não derruba. Tenta reiniciar o ICE repetidamente e só desiste depois de GRACE_MS.
+      updateStatus('Reconectando...', 'waiting');
+      if (!graceTimer) {
+        graceTimer = setTimeout(() => {
+          graceTimer = null;
+          if (pc && pc.connectionState !== 'connected') endCall('Conexão perdida.');
+        }, GRACE_MS);
+      }
+      if (!restartTimer) {
+        const tryRestart = () => {
+          if (!pc || pc.connectionState === 'connected') return;
+          try { pc.restartIce(); } catch (err) { console.error('restartIce', err); }
+        };
+        disconnectTimer = setTimeout(tryRestart, state === 'failed' ? 0 : 2000);
+        restartTimer = setInterval(tryRestart, 6000);
+      }
     }
   };
 
@@ -471,6 +655,59 @@ async function openPicker() {
 pickerCancel.addEventListener('click', () => picker.classList.add('hidden'));
 picker.addEventListener('click', (e) => { if (e.target === picker) picker.classList.add('hidden'); });
 
+// ---------- Cancelador de eco do áudio da tela ----------
+// No Windows 10 anterior à build 20348 o Chromium não consegue excluir o áudio do app da captura do sistema,
+// então a voz do amigo volta junto com o som compartilhado. Este filtro subtrai essa voz do áudio capturado.
+const WIN_BUILD = process.platform === 'win32' ? parseInt(os.release().split('.')[2], 10) : NaN;
+const NEEDS_SOFTWARE_AEC = process.platform === 'win32' && WIN_BUILD < 20348;
+const AEC_WORKLET_URL = pathToFileURL(path.join(__dirname, 'echo-canceller-worklet.js')).href;
+if (NEEDS_SOFTWARE_AEC) aecField.classList.remove('hidden');
+
+async function buildEchoChain(rawTrack) {
+  const ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+  try {
+    await ctx.audioWorklet.addModule(AEC_WORKLET_URL);
+    await ctx.resume();
+    const node = new AudioWorkletNode(ctx, 'echo-canceller', {
+      numberOfInputs: 2, numberOfOutputs: 1, outputChannelCount: [2],
+      channelCount: 2, channelCountMode: 'explicit'
+    });
+    const sys = ctx.createMediaStreamSource(new MediaStream([rawTrack]));
+    sys.connect(node, 0, 0);               // entrada 0: áudio do sistema capturado
+    const dest = ctx.createMediaStreamDestination();
+    dest.channelCount = 2;
+    node.connect(dest);
+    echoChain = { ctx, node, sys, refSource: null, rawTrack, track: dest.stream.getAudioTracks()[0] };
+    attachEchoReference();                 // entrada 1: voz do amigo (referência)
+    return echoChain;
+  } catch (err) {
+    ctx.close().catch(() => {});
+    echoChain = null;
+    throw err;
+  }
+}
+
+function attachEchoReference() {
+  if (!echoChain) return;
+  try { echoChain.refSource?.disconnect(); } catch {}
+  echoChain.refSource = null;
+  const voice = remoteVoice.srcObject;
+  if (!voice || !voice.getAudioTracks().length) return;
+  try {
+    echoChain.refSource = echoChain.ctx.createMediaStreamSource(voice);
+    echoChain.refSource.connect(echoChain.node, 0, 1);
+  } catch (err) { console.error('Referência do cancelador de eco:', err); }
+}
+
+function stopEchoChain() {
+  if (!echoChain) return;
+  const c = echoChain;
+  echoChain = null;
+  try { c.rawTrack.onended = null; c.rawTrack.stop(); } catch {}
+  try { c.track.stop(); } catch {}
+  c.ctx.close().catch(() => {});
+}
+
 pickerConfirm.addEventListener('click', async () => {
   if (!selectedSourceId || !pc) return;
   picker.classList.add('hidden');
@@ -487,13 +724,26 @@ pickerConfirm.addEventListener('click', async () => {
       // Captura "crua" do áudio do sistema: sem cancelamento de eco, sem supressão de ruído e sem controle
       // automático de ganho (filtros feitos para voz que deixam jogos/músicas abafados e "metálicos")
       audio: optAudio.checked
-        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000 }
+        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000,
+            restrictOwnAudio: true } // exclui da captura o áudio tocado por este app (voz/tela do amigo)
         : false
     });
   } catch (e) {
     console.error('Compartilhamento cancelado', e);
     screenStream = null;
     return;
+  }
+
+  // Windows 10 antigo: tira a voz do amigo do áudio capturado. Se falhar, segue com o áudio original.
+  const rawAudio = screenStream.getAudioTracks()[0];
+  if (rawAudio && NEEDS_SOFTWARE_AEC && optAec.checked) {
+    try {
+      const chain = await buildEchoChain(rawAudio);
+      screenStream = new MediaStream([...screenStream.getVideoTracks(), chain.track]);
+    } catch (err) {
+      console.error('Cancelador de eco indisponível, usando o áudio original:', err);
+      toast('Remoção de eco indisponível. Compartilhando sem ela.');
+    }
   }
 
   const videoTrack = screenStream.getVideoTracks()[0];
@@ -546,6 +796,7 @@ function stopScreenShare() {
   screenStream = null;
 
   stream.getTracks().forEach(t => { t.onended = null; t.stop(); });
+  stopEchoChain();
   if (pc && pc.signalingState !== 'closed') {
     screenSenders.forEach(s => { try { pc.removeTrack(s); } catch { /* já removido */ } });
     sendSignalingMsg('screen-info', null);
@@ -613,10 +864,17 @@ btnFullscreen.addEventListener('click', toggleFullscreen);
 // ---------- Encerrar: limpa tudo e volta para o início ----------
 btnEnd.addEventListener('click', () => endCall());
 
+function safe0(fn) { try { fn(); } catch {} }
+
 function endCall(message, type = 'error') {
   if (ending) return;
   ending = true;
+  safe0(() => sendSignalingMsg('bye')); // avisa o amigo que o encerramento foi intencional
   clearTimeout(disconnectTimer);
+  clearTimeout(graceTimer); graceTimer = null;
+  clearTimeout(reconnectTimer); reconnectTimer = null;
+  clearInterval(restartTimer); restartTimer = null;
+  clearInterval(hbTimer); hbTimer = null;
 
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   picker.classList.add('hidden');
@@ -625,13 +883,13 @@ function endCall(message, type = 'error') {
   const safe = (fn) => { try { fn(); } catch (err) { console.error('Erro ao limpar:', err); } };
 
   safe(() => stopScreenShare());
-  safe(() => localStream?.getTracks().forEach(t => t.stop()));
+  safe(() => stopMic(micChain));
   safe(() => { if (pc) { pc.onconnectionstatechange = null; pc.close(); } });
-  safe(() => { if (ws) { ws.removeAllListeners('close'); ws.close(); } });
+  safe(() => { if (ws) { ws.removeAllListeners('close'); ws.on('error', () => {}); ws.close(); } });
   safe(() => wss?.close());
 
   pc = null; ws = null; wss = null;
-  localStream = null; micSender = null;
+  localStream = null; micChain = null; micSender = null;
   screenStream = null; screenSenders = [];
   remoteScreenId = null;
   messageQueue = Promise.resolve();

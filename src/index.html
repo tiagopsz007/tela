@@ -53,6 +53,9 @@
       <button class="btn-primary" id="btn-mic">Desativar Mic</button>
       <button class="btn-secondary" id="btn-screen">Compartilhar Tela</button>
       <button class="btn-primary" id="btn-fullscreen">Tela Cheia</button>
+      <label class="check noise-field" title="Remove ruídos de fundo da sua voz (teclado, ventilador, etc.)">
+        <input type="checkbox" id="opt-noise" checked /> Supressão de ruído
+      </label>
       <label class="volume-field" title="Volume do seu amigo">
         <span>Volume</span>
         <input type="range" id="volume" min="0" max="100" value="100" />
@@ -68,6 +71,7 @@
       <div id="picker-grid"></div>
       <div class="picker-options">
         <label class="check"><input type="checkbox" id="opt-audio" checked /> Compartilhar áudio do sistema</label>
+        <label class="check hidden" id="aec-field" title="Seu Windows não consegue separar a voz do amigo do som compartilhado. Este filtro tenta remover o eco."><input type="checkbox" id="opt-aec" checked /> Remover eco da voz do amigo</label>
         <label class="quality">
           Qualidade
           <select id="opt-quality">

@@ -8,6 +8,7 @@
     "build": "electron-builder --win portable"
   },
   "dependencies": {
+    "@sapphi-red/web-noise-suppressor": "^0.4.1",
     "ws": "^8.16.0"
   },
   "devDependencies": {

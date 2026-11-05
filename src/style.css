@@ -49,6 +49,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .controls { background: #1f2937; padding: 12px 15px; display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 12px; border-top: 1px solid #374151; z-index: 20; }
 .controls button { width: auto; padding: 10px 20px; margin: 0; }
 .volume-field { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: #9ca3af; }
+.noise-field { font-size: 0.85rem; color: #9ca3af; }
 .volume-field input { width: 110px; accent-color: #3b82f6; }
 
 /* ===== Seletor de tela ===== */
